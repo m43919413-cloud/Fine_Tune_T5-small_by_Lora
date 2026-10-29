@@ -1,226 +1,185 @@
-# ViT-10M — Vision Transformer with MoE and Group Query Attention
+# T5-LoRA Summarizer
 
-A lightweight Vision Transformer (~10M parameters) for image classification on **ImageNet-100**, focused on architectural efficiency and training speed.
+Fine-tuning **t5-small** with **LoRA (PEFT)** for dialogue summarization on the
+SAMSUM dataset.
 
-The model combines modern ideas such as **Group Query Attention (GQA)**, **Mixture of Experts (MoE)**, and **RMSNorm** to achieve competitive accuracy with a small parameter budget. Training fully supports **Distributed Data Parallel (DDP)** and **Mixed Precision (AMP)**.
-
----
-
-## ✨ Features
-
-### Model Architecture
-- **Group Query Attention (GQA)**: Fewer Key/Value heads than Query heads for reduced memory and compute.
-- **Mixture of Experts (MoE)**: Each ViT block uses multiple experts with Top-K gating instead of a single FFN.
-- **RMSNorm**: A lighter, more stable alternative to LayerNorm.
-- **Learned Positional Encoding**: Trainable positional embeddings with trunc-normal initialization.
-- **CLS Token + Projection Head**: Follows the original ViT design for classification.
-- **Auxiliary Load-Balancing Loss**: Keeps expert utilization balanced.
-
-### Training
-- Full **DDP** support (multi-GPU) with `DistributedSampler`.
-- **Automatic Mixed Precision (AMP)** via `GradScaler`.
-- **Cosine LR Schedule** with **Warmup**.
-- **Mixup + CutMix + Label Smoothing** via `timm`.
-- **Early Stopping** based on validation accuracy.
-- **Automatic Resume** from the latest checkpoint.
-- **Rolling checkpoint saving** (keeps the last N checkpoints).
-
-### Dataset
-- Loads **ImageNet-100** from HuggingFace (`clane9/imagenet-100`).
-- Strong training augmentation: `RandomResizedCrop`, `RandAugment`, `RandomErasing`.
-- Standard evaluation pipeline: `Resize → CenterCrop → Normalize`.
+A lightweight, parameter-efficient summarization model — the LoRA adapter is
+only ~3 MB, while the base model is loaded separately at inference time.
 
 ---
 
-## 📊 Results
+## Overview
 
-| Metric | Value |
+| Item | Value |
 |---|---|
-| **Top-1 Accuracy @ Epoch 30** | **57%** |
-| Top-5 Accuracy | Typically contains the correct class |
+| **Base model** | t5-small (60M params) |
+| **Fine-tuning method** | LoRA (r=8, alpha=32, target: q, v) |
+| **Dataset** | knkarthick/samsum (dialogue → summary) |
+| **Trainable params** | ~0.6% of total |
+| **Task** | Abstractive dialogue summarization |
+| **Language** | English |
 
-> **Note:** Due to the remaining ~43% error rate, the model often fails to predict the correct class as its **first** guess. However, the correct class is usually present within the **Top-5 predictions**, making Top-5 accuracy a more informative metric for this model at its current training stage.
-
----
-
-## 📁 Project Structure
-
-```
-.
-├── ViT_model.py                 # Model definition (ViT, MoE, GQA, RMSNorm, PatchEmbed)
-├── Transformer_Dataloader.py    # Dataset and DataLoader for ImageNet-100
-├── ViT_Train.py                 # Training loop + DDP + checkpointing
-├── Ineferce_ViT_10m.py          # Inference script on a single image
-└── ViT_10m.pt                   # Trained model weights
-```
+The model was fine-tuned using Seq2SeqTrainer for 3 epochs with a learning
+rate of 3e-4, then the LoRA adapter was saved and merged with the base model
+at inference time.
 
 ---
 
-## ⚙️ Installation
+## Project structure
 
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install datasets pillow timm
-```
-
-> CUDA and NCCL must be available for DDP to work.
+- Fine_Tune_LoRA_T5.py — training script (run on Colab / GPU)
+- Inference_T5.py — inference / usage script
+- adapter_config.json — LoRA adapter config
+- adapter_model.safetensors — LoRA adapter weights (~3 MB)
+- tokenizer.json — tokenizer files
+- requirements.txt
+- .gitignore
+- README.md
 
 ---
 
-## 🚀 Usage
+## Installation
 
-### 1) Train the Model
+Clone the repo and set up a virtual environment:
 
-```bash
-python ViT_Train.py
-```
+    git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+    cd YOUR_REPO
 
-The script automatically detects the number of GPUs:
-- If **2 or more** GPUs are available → trains with DDP across all GPUs.
-- Otherwise → trains on a single GPU or CPU.
+    python -m venv venv
+    source venv/bin/activate          # Linux / macOS
+    # venv\Scripts\activate           # Windows
 
-#### Key Configuration (inside `__main__` in `ViT_Train.py`)
+    pip install -r requirements.txt
 
-| Parameter | Default | Description |
+### requirements.txt
+
+    transformers>=4.40.0
+    peft>=0.10.0
+    torch>=2.0.0
+    datasets>=2.18.0
+    accelerate>=0.28.0
+
+### .gitignore
+
+    venv/
+    __pycache__/
+    *.pyc
+    .ipynb_checkpoints/
+    *.bin
+    *.pt
+    *.pth
+    *.ckpt
+    .DS_Store
+
+Note: the *.bin rule prevents the base model weights (pytorch_model.bin, ~240 MB)
+from being pushed by mistake. adapter_model.safetensors uses the .safetensors
+extension, so it IS committed — that is intentional.
+
+---
+
+## Usage
+
+    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+    from peft import PeftModel
+    import torch
+
+    ADAPTER_PATH = "./"               # folder containing the adapter files
+    BASE_MODEL   = "t5-small"
+
+    tokenizer = AutoTokenizer.from_pretrained(ADAPTER_PATH)
+    base = AutoModelForSeq2SeqLM.from_pretrained(BASE_MODEL)
+    model = PeftModel.from_pretrained(base, ADAPTER_PATH).eval()
+
+    def summarize(dialogue: str) -> str:
+        prompt = "summarize: " + dialogue          # required — same as training
+        inputs = tokenizer(prompt, return_tensors="pt",
+                           truncation=True, max_length=512)
+        out = model.generate(
+            **inputs,
+            max_new_tokens=64,
+            num_beams=4,
+            no_repeat_ngram_size=3,
+            repetition_penalty=1.3,
+            early_stopping=True,
+        )
+        return tokenizer.decode(out[0], skip_special_tokens=True)
+
+    dialogue = """Amanda: I baked cookies. Do you want some?
+    Jerry: Sure!
+    Amanda: I'll bring you tomorrow :-)"""
+
+    print(summarize(dialogue))
+    # → Amanda baked cookies. Jerry will bring Amanda tomorrow.
+
+Important: the "summarize: " prefix is mandatory — it was used during training
+and must be included at inference, otherwise the output degrades badly.
+
+---
+
+## Examples
+
+| Input (dialogue) | Model output | Quality |
 |---|---|---|
-| `batch_size` | `256` | Per-GPU batch size |
-| `num_workers` | `4` | DataLoader workers |
-| `epochs` | `200` | Number of epochs |
-| `lr` | `3e-4` | Initial learning rate (AdamW) |
-| `save_path` | `.../ViT_best.pt` | Best model save path |
-| `save_every` | `2` | Save a checkpoint every N epochs |
-| `keep_last_n` | `3` | Number of checkpoints to keep |
-| `early_stop_acc` | `90.0` | Early-stopping accuracy threshold |
-| `resume` | `True` | Resume from the latest checkpoint |
-
-Checkpoints are saved to the first available directory among:
-1. `/content/drive/MyDrive/ViT_10M_checkpoints`
-2. `./ViT_10M_checkpoints`
-
-### 2) Inference on a Single Image
-
-```bash
-python Ineferce_ViT_10m.py
-```
-
-Set the image path and checkpoint inside the script:
-
-```python
-CKPT_PATH = "ViT_10m.pt"
-IMG_PATH  = "~/Pictures/Screenshots/testmodel2.png"
-```
-
-Example output:
-
-```
-Top-5 predictions:
-  1. tabby, tabby cat        92.31%
-  2. tiger cat               3.12%
-  3. Egyptian cat            1.85%
-  ...
-
-Prediction: tabby, tabby cat  (92.31%)
-```
+| SAMSUM-style conversation | Amanda baked cookies. Jerry will bring Amanda tomorrow. | Good structure, minor role swap |
+| English news article | repetitive / off-topic | Out-of-domain — model trained on dialogues only |
+| Persian text | — | Not supported (t5-small is English-only) |
 
 ---
 
-## 🧠 Architecture Details
+## Limitations
 
-Model configuration (from `make_model` in `ViT_Train.py`):
-
-| Hyperparameter | Value |
-|---|---|
-| `img_size` | 224 |
-| `patch_size` | 16 |
-| `d_model` | 224 |
-| `n_layers` | 8 |
-| `q_heads` | 8 |
-| `kv_heads` | 2 |
-| `d_ff` | 608 |
-| `num_experts` | 4 |
-| `K` (top-k routing) | 2 |
-| `n_classes` | 100 |
-| **Total Parameters** | **≈ 10M** |
-
-### Group Query Attention
-Instead of standard attention (where `q_heads == kv_heads`), each group of Query heads shares a single KV head. This:
-- Reduces KV cache memory usage.
-- Is slightly faster during training.
-- Introduces negligible accuracy loss.
-
-### Mixture of Experts
-Each ViT block uses `num_experts` experts instead of a fixed FFN:
-- **Gate**: A Linear layer producing softmax logits.
-- **Top-K Routing**: Only the top `K` experts are activated per token.
-- **Weighting**: Expert outputs are combined using softmax-normalized weights.
-- **Aux Loss**: Prevents the gate from collapsing onto a single expert.
-
-Final loss:
-
-```
-L_total = L_CE + aux_weight * L_aux
-```
+- Role / entity swapping. t5-small has limited capacity for tracking who does
+  what in multi-turn dialogues. Occasionally the subject and object are inverted
+  (e.g. "Jerry will bring Amanda" instead of the reverse).
+- In-domain only. Trained on casual English dialogues (SAMSUM). News, technical
+  text, and formal documents produce low-quality summaries.
+- English only. t5-small does not support Persian or other languages.
+- Short outputs. Maximum summary length during training was 128 tokens, so the
+  model tends to produce 1–2 sentence summaries.
 
 ---
 
-## 💾 Checkpoint Format
+## Possible improvements
 
-Periodic checkpoints contain:
+To increase summary quality and role-tracking accuracy:
 
-```python
-{
-    "epoch": int,
-    "model": state_dict,
-    "optimizer": state_dict,
-    "scheduler": state_dict,
-    "scaler": state_dict,     # for AMP
-    "best_val": float,
-}
-```
+1. Larger base model — swap t5-small → t5-base or google/flan-t5-base (biggest
+   impact; t5-small is simply too small for entity tracking).
+2. Higher LoRA rank — r=8 → r=16.
+3. More LoRA target modules — ["q", "v"] → ["q", "k", "v", "o", "wi", "wo"].
+4. More epochs / lower LR — 3 → 5 epochs, 3e-4 → 1e-4.
+5. Stronger beam search — num_beams=6.
 
-The final model (`ViT_best.pt`) contains only the model `state_dict`.
+For Persian summarization, use google/mt5-small or mt5-base instead, and
+fine-tune on a Persian summarization dataset.
 
 ---
 
-## 📊 Sample Training Log
+## Training details
 
-```
-epoch 00 | loss 4.3120 | train 5.21% | val 7.84% | lr 3.00e-06 | 142.3s
-epoch 01 | loss 3.9870 | train 12.44% | val 15.02% | lr 6.10e-06 | 138.1s
-   saved best (15.02%)
-...
-epoch 30 | loss 1.6420 | train 58.90% | val 57.00% | lr 2.11e-04 | 136.7s
-```
+    LoraConfig(
+        task_type=TaskType.SEQ_2_SEQ_LM,
+        r=8,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        target_modules=["q", "v"],
+    )
 
----
+    Seq2SeqTrainingArguments(
+        per_device_train_batch_size=8,
+        num_train_epochs=3,
+        learning_rate=3e-4,
+        predict_with_generate=True,
+        eval_strategy="epoch",
+    )
 
-## 📝 Notes
-
-- For DDP, port `29500` must be free (configurable via `MASTER_PORT`).
-- Under DDP, only rank 0 saves checkpoints and prints logs.
-- When early stopping triggers, the decision is broadcast to all ranks.
-- The validation DataLoader uses `num_workers/2` to avoid competing with training.
-
----
-
-## ⚠️ Known Limitations
-
-- At ~30 epochs of training, the model reaches **~57% Top-1 accuracy** on ImageNet-100.
-- The remaining **~43% error** means the model frequently misses the correct class as its first prediction, but the correct class is usually present within the **Top-5** predictions.
-- Further gains are expected with longer training, more aggressive augmentation, or larger expert capacity.
+Inputs were prefixed with "summarize: " and truncated to 512 tokens; summaries
+were truncated to 128 tokens.
 
 ---
 
-## 📜 License
+## Acknowledgements
 
-This project is released under the MIT License — free to use and modify.
-
----
-
-## 🙏 References
-
-- [An Image is Worth 16x16 Words (ViT)](https://arxiv.org/abs/2010.11929)
-- [GQA: Training Generalized Multi-Query Transformer Models](https://arxiv.org/abs/2305.13245)
-- [Switch Transformers (MoE)](https://arxiv.org/abs/2101.03961)
-- [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)
-- Dataset: [`clane9/imagenet-100`](https://huggingface.co/datasets/clane9/imagenet-100)
+- t5-small — Google Research
+- SAMSUM — Samsung R&D
+- PEFT — Hugging Face
